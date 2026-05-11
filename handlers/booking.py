@@ -1,10 +1,7 @@
-# =============================================================
-#  handlers/booking.py — процесс записи клиента (FSM)
-# =============================================================
+import re
 from aiogram import Router, F, Bot
 from aiogram.types import Message, CallbackQuery
 from aiogram.fsm.context import FSMContext
-
 from states.states import BookingStates
 from keyboards.keyboards import (
     dates_kb, slots_kb, confirm_kb, cancel_confirm_kb,
@@ -12,7 +9,6 @@ from keyboards.keyboards import (
 )
 from database.db import (
     get_slot, get_user_booking, create_booking, cancel_booking_by_user,
-    get_booking_for_slot,
 )
 from utils.channel import check_subscription, post_schedule_to_channel
 from utils.scheduler import schedule_reminder, cancel_reminder
@@ -21,11 +17,9 @@ from config import config
 router = Router()
 
 
-# ─── Проверка подписки перед записью ──────────────────────────────────────────
-
 @router.callback_query(F.data == "book_start")
 async def cb_book_start(call: CallbackQuery, state: FSMContext, bot: Bot):
-    """Начало записи: сначала проверяем подписку на канал."""
+    """Начало записи — сначала проверяем подписку."""
     subscribed = await check_subscription(bot, call.from_user.id)
     if not subscribed:
         await call.message.edit_text(
@@ -41,7 +35,7 @@ async def cb_book_start(call: CallbackQuery, state: FSMContext, bot: Bot):
 
 @router.callback_query(F.data == "check_subscription")
 async def cb_check_sub(call: CallbackQuery, state: FSMContext, bot: Bot):
-    """Повторная проверка подписки после нажатия кнопки."""
+    """Повторная проверка подписки."""
     subscribed = await check_subscription(bot, call.from_user.id)
     if not subscribed:
         await call.answer("❌ Вы ещё не подписаны!", show_alert=True)
@@ -51,8 +45,6 @@ async def cb_check_sub(call: CallbackQuery, state: FSMContext, bot: Bot):
 
 
 async def _show_dates(call: CallbackQuery, state: FSMContext):
-    """Отображает доступные даты."""
-    # Проверяем, нет ли уже активной записи
     existing = get_user_booking(call.from_user.id)
     if existing:
         await call.message.edit_text(
@@ -65,7 +57,6 @@ async def _show_dates(call: CallbackQuery, state: FSMContext):
         )
         await call.answer()
         return
-
     await state.set_state(BookingStates.choosing_date)
     await call.message.edit_text(
         "📅 <b>Выберите дату</b>\n\nДоступные даты:",
@@ -74,8 +65,6 @@ async def _show_dates(call: CallbackQuery, state: FSMContext):
     )
     await call.answer()
 
-
-# ─── Выбор даты ───────────────────────────────────────────────────────────────
 
 @router.callback_query(BookingStates.choosing_date, F.data.startswith("date:"))
 async def cb_choose_date(call: CallbackQuery, state: FSMContext):
@@ -90,16 +79,13 @@ async def cb_choose_date(call: CallbackQuery, state: FSMContext):
     await call.answer()
 
 
-# ─── Выбор слота ──────────────────────────────────────────────────────────────
-
 @router.callback_query(BookingStates.choosing_slot, F.data.startswith("slot:"))
 async def cb_choose_slot(call: CallbackQuery, state: FSMContext):
     slot_id = int(call.data.split(":")[1])
     slot = get_slot(slot_id)
     if not slot or slot["is_booked"]:
-        await call.answer("⚠️ Этот слот уже занят, выберите другой!", show_alert=True)
+        await call.answer("⚠️ Этот слот уже занят!", show_alert=True)
         return
-
     await state.update_data(slot_id=slot_id)
     await state.set_state(BookingStates.entering_name)
     await call.message.edit_text(
@@ -110,8 +96,6 @@ async def cb_choose_slot(call: CallbackQuery, state: FSMContext):
     )
     await call.answer()
 
-
-# ─── Ввод имени ───────────────────────────────────────────────────────────────
 
 @router.message(BookingStates.entering_name)
 async def msg_enter_name(message: Message, state: FSMContext):
@@ -127,20 +111,15 @@ async def msg_enter_name(message: Message, state: FSMContext):
     )
 
 
-# ─── Ввод телефона ────────────────────────────────────────────────────────────
-
 @router.message(BookingStates.entering_phone)
 async def msg_enter_phone(message: Message, state: FSMContext):
     phone = message.text.strip()
-    # Простая валидация: должны быть цифры/+/()-пробел
-    import re
     if not re.match(r"^[\+\d\s\(\)\-]{7,15}$", phone):
         await message.answer("⚠️ Неверный формат телефона. Попробуйте ещё раз:")
         return
     await state.update_data(phone=phone)
     data = await state.get_data()
     slot = get_slot(data["slot_id"])
-
     await state.set_state(BookingStates.confirming)
     await message.answer(
         f"📋 <b>Подтвердите запись</b>\n\n"
@@ -153,14 +132,10 @@ async def msg_enter_phone(message: Message, state: FSMContext):
     )
 
 
-# ─── Подтверждение записи ─────────────────────────────────────────────────────
-
 @router.callback_query(BookingStates.confirming, F.data == "confirm_booking")
 async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
     data = await state.get_data()
     slot = get_slot(data["slot_id"])
-
-    # Двойная проверка: слот ещё свободен?
     if not slot or slot["is_booked"]:
         await call.message.edit_text(
             "⚠️ Слот уже занят. Выберите другое время.",
@@ -176,7 +151,6 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         name=data["name"],
         phone=data["phone"],
     )
-
     if not success:
         await call.message.edit_text(
             "⚠️ Не удалось создать запись. Попробуйте позже.",
@@ -186,11 +160,7 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         await call.answer()
         return
 
-    # Получаем ID созданной записи
-    from database.db import get_user_booking
     booking = get_user_booking(call.from_user.id)
-
-    # Планируем напоминание
     if booking:
         schedule_reminder(
             bot=bot,
@@ -200,7 +170,6 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
             time_str=slot["time"],
         )
 
-    # Сообщение пользователю
     await call.message.edit_text(
         f"✅ <b>Вы успешно записаны!</b>\n\n"
         f"📅 Дата: <b>{slot['date']}</b>\n"
@@ -210,28 +179,24 @@ async def cb_confirm(call: CallbackQuery, state: FSMContext, bot: Bot):
         reply_markup=main_menu_kb(),
     )
 
-    # Уведомление администратора
-    admin_text = (
-        f"🔔 <b>Новая запись!</b>\n\n"
-        f"👤 Имя: <b>{data['name']}</b>\n"
-        f"📱 Телефон: <b>{data['phone']}</b>\n"
-        f"🆔 TG ID: <code>{call.from_user.id}</code>\n"
-        f"📅 Дата: <b>{slot['date']}</b>\n"
-        f"🕐 Время: <b>{slot['time']}</b>"
-    )
     try:
-        await bot.send_message(config.ADMIN_ID, admin_text, parse_mode="HTML")
+        await bot.send_message(
+            config.ADMIN_ID,
+            f"🔔 <b>Новая запись!</b>\n\n"
+            f"👤 Имя: <b>{data['name']}</b>\n"
+            f"📱 Телефон: <b>{data['phone']}</b>\n"
+            f"🆔 TG ID: <code>{call.from_user.id}</code>\n"
+            f"📅 Дата: <b>{slot['date']}</b>\n"
+            f"🕐 Время: <b>{slot['time']}</b>",
+            parse_mode="HTML",
+        )
     except Exception:
         pass
 
-    # Обновление расписания в канале
     await post_schedule_to_channel(bot, slot["date"])
-
     await state.clear()
     await call.answer()
 
-
-# ─── Отмена записи пользователем ──────────────────────────────────────────────
 
 @router.callback_query(F.data == "cancel_my_booking")
 async def cb_cancel_my_booking(call: CallbackQuery):
@@ -244,7 +209,6 @@ async def cb_cancel_my_booking(call: CallbackQuery):
         )
         await call.answer()
         return
-
     await call.message.edit_text(
         f"❓ <b>Отменить запись?</b>\n\n"
         f"📅 Дата: <b>{booking['date']}</b>\n"
@@ -263,30 +227,24 @@ async def cb_do_cancel(call: CallbackQuery, bot: Bot):
         await call.answer()
         return
 
-    # Удаляем напоминание
     cancel_reminder(booking["id"])
-
     date = booking["date"]
-    cancelled = cancel_booking_by_user(call.from_user.id)
+    cancel_booking_by_user(call.from_user.id)
 
     await call.message.edit_text(
         "✅ <b>Ваша запись отменена.</b>",
         parse_mode="HTML",
         reply_markup=main_menu_kb(),
     )
-
-    # Уведомление администратора
     try:
         await bot.send_message(
             config.ADMIN_ID,
-            f"❌ <b>Отмена записи</b>\n\n"
+            f"❌ <b>Отмена записи клиентом</b>\n\n"
             f"🆔 TG ID: <code>{call.from_user.id}</code>\n"
             f"📅 Дата: <b>{date}</b>",
             parse_mode="HTML",
         )
     except Exception:
         pass
-
-    # Обновление канала
     await post_schedule_to_channel(bot, date)
     await call.answer()

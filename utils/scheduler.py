@@ -1,26 +1,18 @@
-# =============================================================
-#  utils/scheduler.py — планировщик напоминаний (APScheduler)
-# =============================================================
 from __future__ import annotations
-
 import logging
 from datetime import datetime, timedelta
-
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.jobstores.memory import MemoryJobStore
 from aiogram import Bot
 
 logger = logging.getLogger(__name__)
 
-# Единственный экземпляр планировщика
 scheduler = AsyncIOScheduler(
     jobstores={"default": MemoryJobStore()},
-    timezone="Europe/Moscow",   # ← при необходимости замените на нужную TZ
+    timezone="Europe/Moscow",
 )
 
-
 async def _send_reminder(bot: Bot, user_id: int, time_str: str):
-    """Отправляет напоминание пользователю."""
     text = (
         f"⏰ <b>Напоминание!</b>\n\n"
         f"Напоминаем, что вы записаны на маникюр завтра в <b>{time_str}</b>.\n"
@@ -31,20 +23,12 @@ async def _send_reminder(bot: Bot, user_id: int, time_str: str):
     except Exception as e:
         logger.warning(f"Не удалось отправить напоминание {user_id}: {e}")
 
-
 def schedule_reminder(bot: Bot, booking_id: int, user_id: int, date_str: str, time_str: str):
-    """
-    Планирует напоминание за 24 часа до записи.
-    Если до записи меньше 24 часов — задача НЕ создаётся.
-    """
     appointment_dt = datetime.strptime(f"{date_str} {time_str}", "%Y-%m-%d %H:%M")
     remind_at = appointment_dt - timedelta(hours=24)
-    now = datetime.now()
-
-    if remind_at <= now:
+    if remind_at <= datetime.now():
         logger.info(f"Напоминание для записи {booking_id} не создано (менее 24 ч).")
         return
-
     job_id = f"reminder_{booking_id}"
     scheduler.add_job(
         _send_reminder,
@@ -56,21 +40,15 @@ def schedule_reminder(bot: Bot, booking_id: int, user_id: int, date_str: str, ti
     )
     logger.info(f"Запланировано напоминание [{job_id}] на {remind_at}")
 
-
 def cancel_reminder(booking_id: int):
-    """Удаляет задачу напоминания при отмене записи."""
     job_id = f"reminder_{booking_id}"
     if scheduler.get_job(job_id):
         scheduler.remove_job(job_id)
         logger.info(f"Напоминание [{job_id}] удалено.")
 
-
 def restore_reminders(bot: Bot):
-    """
-    Восстанавливает все будущие напоминания из БД после перезапуска.
-    Вызывается при старте бота.
-    """
     from database.db import get_all_future_bookings
+    from datetime import datetime, timedelta
     bookings = get_all_future_bookings()
     now = datetime.now()
     restored = 0
